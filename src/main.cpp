@@ -12,16 +12,16 @@ volatile int16_t prev_raw_angle       = 0;
 volatile int32_t cumulative_raw_angle = 0;
 volatile double  output_angle         = 0.0;
 
-double target_angle = 5000.;
+int target_angle = 5000.;
 
 constexpr double CONTROL_CYCLE = 1000.;
 
-Pid angle_pid(2., 0.0, 0.);
-Pid speed_pid(1., 0.0, 0.);
+Pid angle_pid(2., 0.0, 0.003);
+Pid speed_pid(1.0, 0.0, 0.003);
 
 void onReceive(int packetSize);
 
-double calcError(double target, double current);
+double calcError(int target, double current);
 
 void handleSerialInput();
 
@@ -57,20 +57,22 @@ void loop() {
 
         double dt = CONTROL_CYCLE / 1000.0; // ms
 
-        // ===== 位置PID → 速度 =====
+        // 位置PIDから速度
         double error = calcError(target_angle, output_angle);
         angle_pid.setTarget(0.);
         angle_pid.update(-error, dt);
         double target_speed = angle_pid.getOutput();
-        target_speed        = constrain(target_speed, -1200, 1200);
 
-        // ===== 速度PID → 電流 =====
+        constexpr int16_t SPEED_LIMIT = 2000;
+
+        target_speed = constrain(target_speed, -SPEED_LIMIT, SPEED_LIMIT);
+
+        // 速度PIDから電流
         speed_pid.setTarget(target_speed);
         speed_pid.update(speed, dt);
         int16_t motor_current = (int16_t)speed_pid.getOutput();
 
-        // ===== 安全制限 =====
-        constexpr int16_t MOTOR_CURRENT_LIMIT = 2000;
+        constexpr int16_t MOTOR_CURRENT_LIMIT = 5000;
 
         motor_current = constrain(motor_current, -MOTOR_CURRENT_LIMIT, MOTOR_CURRENT_LIMIT);
 
@@ -79,11 +81,9 @@ void loop() {
             motor_current = 0;
         }
 
-        // ===== デバッグ出力 =====
-        Serial.printf("angle: %.2f target: %.2f speed: %d target_speed: %.2f current: %d\n", output_angle, target_angle, speed,
+        Serial.printf("angle: %.2f target: %d speed: %d target_speed: %.2f current: %d\n", output_angle, target_angle, speed,
                       target_speed, motor_current);
 
-        // ===== CAN送信 =====
         CAN.beginPacket(0x200);
         for (int i = 0; i < 4; i++) {
             CAN.write(motor_current >> 8);
@@ -101,7 +101,6 @@ void handleSerialInput() {
             // target_angleを設定
             int16_t value = Serial.parseInt();
             target_angle  = value;
-            Serial.printf("target_angle set to: %d\n", target_angle);
         } else if (cmd == 'g' || cmd == 'G') {
             // 現在値表示
             Serial.printf("Current angle: %.2f, target: %d\n", output_angle, target_angle);
@@ -133,8 +132,8 @@ void onReceive(int packetSize) {
     output_angle = (double)cumulative_raw_angle / 19.0;
 }
 
-double calcError(double target, double current) {
-    double error = target - current;
+double calcError(int target, double current) {
+    double error = (double)target - current;
 
     return error;
 }
