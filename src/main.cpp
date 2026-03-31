@@ -77,8 +77,8 @@ void loop() {
         // 位置PIDから速度
         double error = calcError(target_angle, output_angle);
         angle_pid.setTarget(0.);
-        angle_pid.update(-error, dt);
-        double target_speed = angle_pid.getOutput();
+
+        double target_speed = angle_pid.update(-error, dt);
 
         constexpr int16_t SPEED_LIMIT = 2000;
 
@@ -91,8 +91,7 @@ void loop() {
 
         // 速度PIDから電流
         speed_pid.setTarget(target_speed);
-        speed_pid.update(speed, dt);
-        int16_t motor_current = (int16_t)speed_pid.getOutput();
+        int16_t motor_current = speed_pid.update(speed, dt);
 
         constexpr int16_t MOTOR_CURRENT_LIMIT = 5000;
 
