@@ -18,8 +18,10 @@ int target_angle = 5000.;
 constexpr double   CONTROL_CYCLE           = 1000.;
 constexpr uint32_t DEBUG_PRINT_INTERVAL_MS = 100; // 10Hz表示
 
-Pid angle_pid(2., 0.001, 0.003);
-Pid speed_pid(1.0, 0.0005, 0.003);
+Pid angle_pid(2.05, 0.001, 0.03);
+Pid speed_pid(1.2, 0.0005, 0.03);
+
+constexpr int32_t ENCODER_PERIOD = 8192; // 1回転
 
 constexpr double  NEAR_ERROR_BAND   = 80.0; // angle単位
 constexpr int16_t NEAR_SPEED_LIMIT  = 500;  // 目標近傍の速度制限
@@ -36,7 +38,8 @@ double calcError(int target, double current);
 void   handleSerialInput();
 void   refreshPrompt();
 void   processCommand(const char* input);
-void   clearCurrentLine(); // 追加
+void   clearCurrentLine();
+double normalizeAngle(double value);
 
 void setup() {
     Serial.begin(115200);
@@ -104,8 +107,11 @@ void loop() {
             last_debug_ms = millis();
 
             clearCurrentLine();
-            Serial.printf("angle: %.2f target: %d speed: %d target_speed: %.2f current: %d\n", output_angle, target_angle,
-                          speed, target_speed, motor_current);
+            double error      = calcError(target_angle, output_angle);
+            double norm_angle = normalizeAngle(output_angle);
+
+            Serial.printf("angle: %.2f (norm: %.2f) target: %d error: %.2f speed: %d target_speed: %.2f current: %d\n",
+                          output_angle, norm_angle, target_angle, error, speed, target_speed, motor_current);
             refreshPrompt();
         }
 
@@ -177,11 +183,13 @@ void refreshPrompt() {
     Serial.print(input_buffer);
 
     size_t now_len = 2 + input_length; // "> " + 入力文字列
-    // 短くなったときに残骸をけす
+    // 短くなったときに残骸が残らないようにする
     if (last_prompt_len > now_len) {
+        // 短くなったぶんだけ消す
         for (size_t i = 0; i < (last_prompt_len - now_len); i++) {
             Serial.print(' ');
         }
+        // 書き直し
         Serial.print('\r');
         Serial.print("> ");
         Serial.print(input_buffer);
@@ -193,15 +201,18 @@ void processCommand(const char* input) {
     char cmd = input[0];
 
     if (cmd == 't' || cmd == 'T') {
-        // charからintへ
-        int value    = atoi(input + 1);
+        int value = atoi(input + 1);
+
+        // 0〜8191に正規化（8192は0と同じ）
+        value = ((value % ENCODER_PERIOD) + ENCODER_PERIOD) % ENCODER_PERIOD;
+
         target_angle = value;
         Serial.printf("target set: %d\n", target_angle);
     }
 }
 
 void onReceive(int packetSize) {
-    if (CAN.packetId() != 0x204) {
+    if (CAN.packetId() != 0x202) {
         while (CAN.available())
             CAN.read(); // 破棄
         return;
@@ -233,6 +244,19 @@ void onReceive(int packetSize) {
     output_angle = cumulative_raw_angle / 19.0;
 }
 
+double normalizeAngle(double value) {
+    double n = fmod(value, (double)ENCODER_PERIOD);
+    if (n < 0) n += ENCODER_PERIOD;
+    return n;
+}
+
 double calcError(int target, double currentValue) {
-    return (double)target - currentValue;
+    double t = normalizeAngle((double)target);
+    double c = normalizeAngle(currentValue);
+
+    double e = t - c;
+    if (e > ENCODER_PERIOD / 2.0) e -= ENCODER_PERIOD;
+    if (e < -ENCODER_PERIOD / 2.0) e += ENCODER_PERIOD;
+
+    return e;
 }
