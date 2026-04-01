@@ -2,7 +2,8 @@
 #include <CAN.h>
 #include <ctype.h>
 
-#include "PID.hpp"
+#include "AnglePID.h"
+#include "SpeedPID.h"
 
 volatile int16_t angle   = 0;
 volatile int16_t speed   = 0;
@@ -15,11 +16,8 @@ volatile double  output_angle         = 0.0;
 
 int target_angle = 5000.;
 
-constexpr double   CONTROL_CYCLE           = 1000.;
-constexpr uint32_t DEBUG_PRINT_INTERVAL_MS = 100; // 10Hz表示
-
-Pid angle_pid(2.05, 0.001, 0.03);
-Pid speed_pid(1.2, 0.0005, 0.03);
+constexpr double   CONTROL_CYCLE           = 1000.; // [us]
+constexpr uint32_t DEBUG_PRINT_INTERVAL_MS = 100;   // 10Hz表示
 
 constexpr int32_t ENCODER_PERIOD = 8192; // 1回転
 
@@ -28,18 +26,27 @@ constexpr int16_t NEAR_SPEED_LIMIT  = 500;  // 目標近傍の速度制限
 constexpr double  POSITION_DEADBAND = 2.0;  // 到達判定
 constexpr int16_t SPEED_DEADBAND    = 20;   // 停止判定
 
+constexpr int16_t SPEED_LIMIT         = 2000;
+constexpr int16_t MOTOR_CURRENT_LIMIT = 5000;
+
+// 位置→速度 PID（出力は速度指令）
+AnglePID angle_pid(2.05, 0.001, 0.03, -SPEED_LIMIT, SPEED_LIMIT, ENCODER_PERIOD, SPEED_LIMIT, -SPEED_LIMIT);
+
+// 速度→電流 PID（出力は電流指令）
+SpeedPID speed_pid(1.2, 0.0005, 0.03, -MOTOR_CURRENT_LIMIT, MOTOR_CURRENT_LIMIT);
+
 constexpr size_t INPUT_BUFFER_SIZE               = 32;
 char             input_buffer[INPUT_BUFFER_SIZE] = {0};
 size_t           input_length                    = 0;
 size_t           last_prompt_len                 = 0; // 直前の表示長
 
-void   onReceive(int packetSize);
-double calcError(int target, double current);
-void   handleSerialInput();
-void   refreshPrompt();
-void   processCommand(const char* input);
-void   clearCurrentLine();
-double normalizeAngle(double value);
+void    onReceive(int packetSize);
+void    handleSerialInput();
+void    refreshPrompt();
+void    processCommand(const char* input);
+void    clearCurrentLine();
+double  normalizeAngle(double value);
+int16_t calculateDelta(int16_t raw_angle, int16_t prev_raw_angle);
 
 void setup() {
     Serial.begin(115200);
@@ -72,30 +79,22 @@ void loop() {
     if (now - prev_time >= CONTROL_CYCLE) {
         prev_time += CONTROL_CYCLE;
 
-        double dt = CONTROL_CYCLE / 1000.0; // ms
+        // dt は秒単位
+        const double dt = CONTROL_CYCLE / 1000000.0;
 
         // 位置PIDから速度
-        double error = calcError(target_angle, output_angle);
-        angle_pid.setTarget(0.);
 
-        double target_speed = angle_pid.update(-error, dt);
+        double target_speed = angle_pid.update(target_angle, (long)output_angle, dt);
+        double error        = angle_pid.getError();
 
-        constexpr int16_t SPEED_LIMIT = 2000;
-
-        target_speed = constrain(target_speed, -SPEED_LIMIT, SPEED_LIMIT);
+        // 速度PIDから電流
+        double  motor_current_f = speed_pid.update(target_speed, (double)speed, dt);
+        int16_t motor_current   = (int16_t)motor_current_f;
 
         // 目標近傍では速度指令を弱める（行き過ぎ抑制）
         if (fabs(error) < NEAR_ERROR_BAND) {
             target_speed = constrain(target_speed, -NEAR_SPEED_LIMIT, NEAR_SPEED_LIMIT);
         }
-
-        // 速度PIDから電流
-        speed_pid.setTarget(target_speed);
-        int16_t motor_current = speed_pid.update(speed, dt);
-
-        constexpr int16_t MOTOR_CURRENT_LIMIT = 5000;
-
-        motor_current = constrain(motor_current, -MOTOR_CURRENT_LIMIT, MOTOR_CURRENT_LIMIT);
 
         // 目標到達時は電流0（微振動防止）
         if (fabs(error) <= POSITION_DEADBAND && abs(speed) <= SPEED_DEADBAND) {
@@ -106,7 +105,6 @@ void loop() {
             last_debug_ms = millis();
 
             clearCurrentLine();
-            double error      = calcError(target_angle, output_angle);
             double norm_angle = normalizeAngle(output_angle);
 
             Serial.printf("angle: %.2f (norm: %.2f) target: %d error: %.2f speed: %d target_speed: %.2f current: %d\n",
@@ -202,8 +200,7 @@ void processCommand(const char* input) {
     if (cmd == 't' || cmd == 'T') {
         int value = atoi(input + 1);
 
-        // 0〜8191に正規化（8192は0と同じ）
-        value = ((value % ENCODER_PERIOD) + ENCODER_PERIOD) % ENCODER_PERIOD;
+        value = normalizeAngle(value);
 
         target_angle = value;
         Serial.printf("target set: %d\n", target_angle);
@@ -233,9 +230,7 @@ void onReceive(int packetSize) {
     current           = (int16_t)((data[4] << 8) | data[5]);
     temp              = data[6];
 
-    int16_t delta = raw_angle - prev_raw_angle;
-    if (delta > 4096) delta -= 8192;
-    if (delta < -4096) delta += 8192;
+    int16_t delta = calculateDelta(raw_angle, prev_raw_angle);
 
     cumulative_raw_angle += delta;
     prev_raw_angle = raw_angle;
@@ -243,19 +238,14 @@ void onReceive(int packetSize) {
     output_angle = cumulative_raw_angle / 19.0;
 }
 
+// エンコーダの範囲におさめる
 double normalizeAngle(double value) {
     double n = fmod(value, (double)ENCODER_PERIOD);
     if (n < 0) n += ENCODER_PERIOD;
     return n;
 }
-
-double calcError(int target, double currentValue) {
-    double t = normalizeAngle((double)target);
-    double c = normalizeAngle(currentValue);
-
-    double e = t - c;
-    if (e > ENCODER_PERIOD / 2.0) e -= ENCODER_PERIOD;
-    if (e < -ENCODER_PERIOD / 2.0) e += ENCODER_PERIOD;
-
-    return e;
+int16_t calculateDelta(int16_t raw_angle, int16_t prev_raw_angle) {
+    int16_t delta = raw_angle - prev_raw_angle;
+    if (delta > ENCODER_PERIOD / 2) delta -= ENCODER_PERIOD;
+    if (delta < -ENCODER_PERIOD / 2) delta += ENCODER_PERIOD;
 }
