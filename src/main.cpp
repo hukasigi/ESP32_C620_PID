@@ -30,10 +30,10 @@ constexpr int16_t SPEED_LIMIT         = 2000;
 constexpr int16_t MOTOR_CURRENT_LIMIT = 5000;
 
 // 位置→速度 PID（出力は速度指令）
-AnglePID angle_pid(2.05, 0.001, 0.03, -SPEED_LIMIT, SPEED_LIMIT, ENCODER_PERIOD, SPEED_LIMIT, -SPEED_LIMIT);
+AnglePID angle_pid(1.2, 0.0, 0.03, -SPEED_LIMIT, SPEED_LIMIT, ENCODER_PERIOD, SPEED_LIMIT, -SPEED_LIMIT);
 
 // 速度→電流 PID（出力は電流指令）
-SpeedPID speed_pid(1.2, 0.0005, 0.03, -MOTOR_CURRENT_LIMIT, MOTOR_CURRENT_LIMIT);
+SpeedPID speed_pid(8., 25.0, 0.03, -MOTOR_CURRENT_LIMIT, MOTOR_CURRENT_LIMIT);
 
 constexpr size_t INPUT_BUFFER_SIZE               = 32;
 char             input_buffer[INPUT_BUFFER_SIZE] = {0};
@@ -87,14 +87,14 @@ void loop() {
         double target_speed = angle_pid.update(target_angle, (long)output_angle, dt);
         double error        = angle_pid.getError();
 
-        // 速度PIDから電流
-        double  motor_current_f = speed_pid.update(target_speed, (double)speed, dt);
-        int16_t motor_current   = (int16_t)motor_current_f;
-
         // 目標近傍では速度指令を弱める（行き過ぎ抑制）
         if (fabs(error) < NEAR_ERROR_BAND) {
             target_speed = constrain(target_speed, -NEAR_SPEED_LIMIT, NEAR_SPEED_LIMIT);
         }
+
+        // 速度PIDから電流
+        double  motor_current_f = speed_pid.update(target_speed, (double)speed, dt);
+        int16_t motor_current   = (int16_t)motor_current_f;
 
         // 目標到達時は電流0（微振動防止）
         if (fabs(error) <= POSITION_DEADBAND && abs(speed) <= SPEED_DEADBAND) {
@@ -208,15 +208,15 @@ void processCommand(const char* input) {
 }
 
 void onReceive(int packetSize) {
-    if (CAN.packetId() != 0x202) {
+    if (CAN.packetId() != 0x204) {
         while (CAN.available())
-            CAN.read(); // 破棄
+            CAN.read();
         return;
     }
 
-    if (packetSize < 7) {
+    if (packetSize < 8) {
         while (CAN.available())
-            CAN.read(); // 不正長は破棄
+            CAN.read();
         return;
     }
 
@@ -248,4 +248,5 @@ int16_t calculateDelta(int16_t raw_angle, int16_t prev_raw_angle) {
     int16_t delta = raw_angle - prev_raw_angle;
     if (delta > ENCODER_PERIOD / 2) delta -= ENCODER_PERIOD;
     if (delta < -ENCODER_PERIOD / 2) delta += ENCODER_PERIOD;
+    return delta;
 }
